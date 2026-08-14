@@ -350,6 +350,59 @@ SOCKET InitSocketClient(const char *hostname, int Port,int AllowBlocking)
 #endif /* _WIN32 */
 }
 
+/**********************************************************************/
+/* Unix domain socket server — binds to a socket file path instead of a TCP
+ * port.  Both shire-42 and shire-director share the simulith_ipc volume
+ * mounted at /tmp, so the socket file is visible from both containers. */
+SOCKET InitUnixSocketServer(const char *path, int AllowBlocking)
+{
+#if defined(_WIN32)
+      printf("InitUnixSocketServer: Unix sockets not supported on Windows.\n");
+      exit(1);
+#else
+      SOCKET init_sockfd, sockfd;
+      int flags;
+      socklen_t clilen;
+      struct sockaddr_un Server, Client;
+
+      /* Remove stale socket file so bind succeeds after restart. */
+      unlink(path);
+
+      init_sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
+      if (init_sockfd < 0) {
+         printf("Error opening Unix server socket.\n");
+         exit(1);
+      }
+
+      memset(&Server, 0, sizeof(Server));
+      Server.sun_family = AF_UNIX;
+      strncpy(Server.sun_path, path, sizeof(Server.sun_path) - 1);
+
+      if (bind(init_sockfd, (struct sockaddr *)&Server, sizeof(Server)) < 0) {
+         printf("Error binding Unix server socket to %s.\n", path);
+         exit(1);
+      }
+      printf("Unix server is listening on %s\n", path);
+      listen(init_sockfd, 5);
+
+      clilen = sizeof(Client);
+      sockfd = accept(init_sockfd, (struct sockaddr *)&Client, &clilen);
+      if (sockfd < 0) {
+         printf("Error accepting Unix client socket.\n");
+         exit(1);
+      }
+      printf("Unix server side of socket established on %s\n", path);
+      close(init_sockfd);
+
+      if (!AllowBlocking) {
+         flags = fcntl(sockfd, F_GETFL, 0);
+         fcntl(sockfd, F_SETFL, flags | O_NONBLOCK);
+      }
+
+      return sockfd;
+#endif
+}
+
 /* #ifdef __cplusplus
 ** }
 ** #endif

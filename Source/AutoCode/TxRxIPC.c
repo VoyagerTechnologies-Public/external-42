@@ -720,6 +720,20 @@ void ReadFromSocket(SOCKET Socket, long EchoEnabled)
          SC[Is].RequestStateRefresh = 1;
       }
 
+      if (sscanf(line,"SC[%ld].Whl[%ld].Tcmd = %le",
+         &Is,&k,
+         &DbleVal[0]) == 3)
+      {
+         SC[Is].Whl[k].Tcmd = DbleVal[0];
+      }
+
+      if (sscanf(line,"SC[%ld].MTB[%ld].Mcmd = %le",
+         &Is,&k,
+         &DbleVal[0]) == 3)
+      {
+         SC[Is].MTB[k].Mcmd = DbleVal[0];
+      }
+
       if (sscanf(line,"World[%ld].PosH = [%le %le %le]",
          &Is,
          &DbleVal[0],

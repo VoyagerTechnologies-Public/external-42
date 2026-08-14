@@ -40,7 +40,7 @@
    /* Finesse winsock SOCKET datatype */
    #define SOCKET int
 #endif
-/* #include <sys/un.h> */
+#include <sys/un.h>
 
 FILE *FileOpen(const char *Path, const char *File, const char *CtrlCode);
 long ScanLine(FILE *infile, const char *format, long ExpectedNumItems,...);
@@ -52,6 +52,7 @@ double *PpmToPsf(const char *path, const char *filename,
 
 SOCKET InitSocketServer(int Port, int AllowBlocking);
 SOCKET InitSocketClient(const char *hostname, int Port, int AllowBlocking);
+SOCKET InitUnixSocketServer(const char *path, int AllowBlocking);
 
 /*
 ** #ifdef __cplusplus

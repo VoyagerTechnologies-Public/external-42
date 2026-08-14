@@ -74,7 +74,10 @@ void InitInterProcessComm(void)
 
          if (I->Mode == IPC_TX) {
             if (I->SocketRole == IPC_SERVER) {
-               I->Socket = InitSocketServer(I->Port,I->AllowBlocking);
+               if (I->HostName[0] == '/')
+                  I->Socket = InitUnixSocketServer(I->HostName,I->AllowBlocking);
+               else
+                  I->Socket = InitSocketServer(I->Port,I->AllowBlocking);
             }
             else if (I->SocketRole == IPC_CLIENT) {
                I->Socket = InitSocketClient(I->HostName,I->Port,I->AllowBlocking);
@@ -95,7 +98,10 @@ void InitInterProcessComm(void)
          }
          else if (I->Mode == IPC_RX) {
             if (I->SocketRole == IPC_SERVER) {
-               I->Socket = InitSocketServer(I->Port,I->AllowBlocking);
+               if (I->HostName[0] == '/')
+                  I->Socket = InitUnixSocketServer(I->HostName,I->AllowBlocking);
+               else
+                  I->Socket = InitSocketServer(I->Port,I->AllowBlocking);
             }
             else if (I->SocketRole == IPC_CLIENT) {
                I->Socket = InitSocketClient(I->HostName,I->Port,I->AllowBlocking);
@@ -117,7 +123,10 @@ void InitInterProcessComm(void)
          }
          else if (I->Mode == IPC_TXRX) {
             if (I->SocketRole == IPC_SERVER) {
-               I->Socket = InitSocketServer(I->Port,I->AllowBlocking);
+               if (I->HostName[0] == '/')
+                  I->Socket = InitUnixSocketServer(I->HostName,I->AllowBlocking);
+               else
+                  I->Socket = InitSocketServer(I->Port,I->AllowBlocking);
             }
             else if (I->SocketRole == IPC_CLIENT) {
                I->Socket = InitSocketClient(I->HostName,I->Port,I->AllowBlocking);
