@@ -13,6 +13,14 @@
 
 
 #include "42.h"
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <math.h>
+#include <stdint.h>
+#include <sys/mman.h>
+#include <time.h>
+#include <unistd.h>
 #define EXTERN extern
 #include "42gl.h"
 #undef EXTERN
@@ -46,6 +54,78 @@ void SetupViewVolume(int width, int height)
 void TimerHandler(int value)
 {
       TimerHasExpired = 1;
+}
+
+typedef struct {
+      uint64_t Due;
+      uint64_t Sent;
+      uint64_t Throttled;
+} ShireGraphicsMetricsType;
+
+static ShireGraphicsMetricsType ShireGraphicsFallbackMetrics;
+static ShireGraphicsMetricsType *ShireGraphicsMetrics = NULL;
+
+static void ShireInitializeGraphicsMetrics(void)
+{
+      int File;
+
+      if (ShireGraphicsMetrics != NULL) return;
+      ShireGraphicsMetrics = &ShireGraphicsFallbackMetrics;
+      File = open("/tmp/fortytwo-output-metrics.bin",O_RDWR|O_CREAT|O_TRUNC,0666);
+      if (File < 0) return;
+      if (ftruncate(File,sizeof(*ShireGraphicsMetrics)) == 0) {
+         void *Mapping = mmap(NULL,sizeof(*ShireGraphicsMetrics),
+            PROT_READ|PROT_WRITE,MAP_SHARED,File,0);
+         if (Mapping != MAP_FAILED) {
+            ShireGraphicsMetrics = Mapping;
+            memset(ShireGraphicsMetrics,0,sizeof(*ShireGraphicsMetrics));
+         }
+      }
+      close(File);
+}
+
+static int ShireGraphicsDue(void)
+{
+      static long Initialized = 0;
+      static long long PeriodNs = 200000000LL;
+      static long long LastDrawNs = 0;
+      struct timespec Now;
+
+      if (!Initialized) {
+         const char *Rate = getenv("FORTYTWO_GRAPHICS_HZ");
+         char *End = NULL;
+         double Hz = 5.0;
+         if (Rate != NULL) {
+            errno = 0;
+            double Parsed = strtod(Rate,&End);
+            if (errno == 0 && End != Rate && *End == '\0' &&
+                isfinite(Parsed) && Parsed >= 0.0)
+               Hz = Parsed;
+         }
+         if (Hz > 0.0) {
+            double RequestedPeriod = 1.0E9/Hz;
+            PeriodNs = RequestedPeriod < 1.0 ? 1 :
+               (RequestedPeriod > (double)LLONG_MAX ? LLONG_MAX :
+                (long long)RequestedPeriod);
+         }
+         else PeriodNs = 0;
+         Initialized = 1;
+      }
+      ShireInitializeGraphicsMetrics();
+      ShireGraphicsMetrics->Due++;
+      if (PeriodNs == 0) {
+         ShireGraphicsMetrics->Throttled++;
+         return 0;
+      }
+      clock_gettime(CLOCK_MONOTONIC,&Now);
+      long long NowNs = (long long)Now.tv_sec*1000000000LL + Now.tv_nsec;
+      if (LastDrawNs != 0 && NowNs-LastDrawNs < PeriodNs) {
+         ShireGraphicsMetrics->Throttled++;
+         return 0;
+      }
+      LastDrawNs = NowNs;
+      ShireGraphicsMetrics->Sent++;
+      return 1;
 }
 /*********************************************************************/
 void Idle(void)
@@ -84,7 +164,7 @@ void Idle(void)
             TimerHasExpired = 0;
             glutTimerFunc(TimerDuration,TimerHandler,0);
             Done = SimStep();
-            if (GLOutFlag) {
+            if (GLOutFlag && ShireGraphicsDue()) {
                glutSetWindow(CamWindow);
                CamRenderExec();
                glutSwapBuffers();
