@@ -1,11 +1,197 @@
 #include "42.h"
+#include "shire_ipc_protocol.h"
+#include <errno.h>
+#include <math.h>
 #define EXTERN extern
 #include "Ac.h"
 #undef EXTERN
 
+static int ShireBinaryIpcEnabled(void)
+{
+      const char *Mode = getenv("FORTYTWO_IPC_MODE");
+      return Mode == NULL || strcmp(Mode,"text");
+}
+
+static int ShireWriteAll(SOCKET Socket, const void *Buffer, size_t Length)
+{
+      const char *Cursor = Buffer;
+      while(Length > 0) {
+         ssize_t Count = write(Socket,Cursor,Length);
+         if (Count < 0 && errno == EINTR) continue;
+         if (Count <= 0) return -1;
+         Cursor += Count;
+         Length -= (size_t)Count;
+      }
+      return 0;
+}
+
+static int ShireReadAll(SOCKET Socket, void *Buffer, size_t Length)
+{
+      char *Cursor = Buffer;
+      while(Length > 0) {
+         ssize_t Count = read(Socket,Cursor,Length);
+         if (Count < 0 && errno == EINTR) continue;
+         if (Count <= 0) return -1;
+         Cursor += Count;
+         Length -= (size_t)Count;
+      }
+      return 0;
+}
+
+static int ShireReadTextFrame(SOCKET Socket, char *Buffer, size_t Capacity,
+   size_t *Length)
+{
+      static const char EndMarker[] = "[ENDMSG]\n";
+      size_t Used = 0;
+
+      if (Buffer == NULL || Length == NULL || Capacity < sizeof(EndMarker))
+         return -1;
+      while(Used < Capacity-1) {
+         ssize_t Count = read(Socket,&Buffer[Used],Capacity-1-Used);
+         if (Count < 0 && errno == EINTR) continue;
+         if (Count <= 0) return -1;
+         Used += (size_t)Count;
+         Buffer[Used] = '\0';
+         if (strstr(Buffer,EndMarker) != NULL) {
+            *Length = Used;
+            return 0;
+         }
+      }
+      return -1;
+}
+
+static void ShireWriteBinaryState(SOCKET Socket)
+{
+      shire_ipc_state_t State;
+      long i;
+      memset(&State,0,sizeof(State));
+      State.header.magic = SHIRE_IPC_MAGIC;
+      State.header.version = SHIRE_IPC_VERSION;
+      State.header.type = SHIRE_IPC_STATE;
+      State.header.payload_size = sizeof(State)-sizeof(State.header);
+      State.sim_time = SimTime;
+      if (Nsc > 0 && SC[0].Exists) {
+         for(i=0;i<4;i++) State.qn[i] = SC[0].qn[i];
+         for(i=0;i<3;i++) {
+            State.wn[i] = SC[0].wn[i];
+            State.sun_vector_body[i] = SC[0].svb[i];
+            State.mag_field_body[i] = SC[0].bvb[i];
+            State.hvb[i] = SC[0].Hvb[i];
+            State.cm[i] = SC[0].cm[i];
+            State.inertia[i][0] = SC[0].I[i][0];
+            State.inertia[i][1] = SC[0].I[i][1];
+            State.inertia[i][2] = SC[0].I[i][2];
+         }
+         State.mass = SC[0].mass;
+         State.eclipse = (int32_t)SC[0].Eclipse;
+         State.atmo_density = SC[0].AtmoDensity;
+      }
+      if (Norb > 0 && Orb[0].Exists) {
+         for(i=0;i<3;i++) {
+            State.pos_n[i] = Orb[0].PosN[i];
+            State.vel_n[i] = Orb[0].VelN[i];
+         }
+      }
+      if (ShireWriteAll(Socket,&State,sizeof(State)) != 0) {
+         printf("Error writing binary state to socket.\n");
+         exit(1);
+      }
+}
+
+static void ShireReadBinaryCommands(SOCKET Socket)
+{
+      shire_ipc_commands_t Batch;
+      shire_ipc_ack_t Ack;
+      uint32_t c,i;
+      int Valid = 1;
+      memset(&Batch,0,sizeof(Batch));
+      if (ShireReadAll(Socket,&Batch.header,sizeof(Batch.header)) != 0) {
+         printf("Error reading binary commands from socket.\n");
+         exit(1);
+      }
+      if (Batch.header.payload_size > sizeof(Batch)-sizeof(Batch.header)) {
+         printf("Oversized SHIRE binary command frame.\n");
+         exit(1);
+      }
+      if (ShireReadAll(Socket,&Batch.count,Batch.header.payload_size) != 0) {
+         printf("Error reading binary command payload from socket.\n");
+         exit(1);
+      }
+      memset(&Ack,0,sizeof(Ack));
+      Ack.header.magic = SHIRE_IPC_MAGIC;
+      Ack.header.version = SHIRE_IPC_VERSION;
+      Ack.header.type = SHIRE_IPC_ACK;
+      Ack.header.payload_size = sizeof(Ack)-sizeof(Ack.header);
+      if (Batch.header.magic != SHIRE_IPC_MAGIC ||
+          Batch.header.version != SHIRE_IPC_VERSION ||
+          Batch.header.type != SHIRE_IPC_COMMANDS ||
+          Batch.count > SHIRE_IPC_MAX_COMMANDS ||
+          Batch.header.payload_size !=
+             SHIRE_IPC_COMMANDS_PAYLOAD_SIZE(Batch.count)) {
+         printf("Invalid SHIRE binary command frame.\n");
+         Valid = 0;
+      }
+      for(c=0;Valid && c<Batch.count;c++) {
+         shire_ipc_command_t *Cmd = &Batch.commands[c];
+         if (Cmd->spacecraft_id < 0 || Cmd->spacecraft_id >= Nsc ||
+             !SC[Cmd->spacecraft_id].Exists ||
+             (Cmd->type != SHIRE_IPC_CMD_WHEEL &&
+              Cmd->type != SHIRE_IPC_CMD_MTB &&
+              Cmd->type != SHIRE_IPC_CMD_THRUSTER)) {
+            printf("Invalid SHIRE binary command target/type.\n");
+            Valid = 0;
+         }
+         for(i=0;Valid && i<3;i++) {
+            if ((Cmd->enable_mask & (1U << i)) != 0 &&
+                (!isfinite(Cmd->values[i]) ||
+                 (Cmd->type == SHIRE_IPC_CMD_THRUSTER &&
+                  !isfinite(Cmd->values[i+3])))) {
+               printf("Invalid non-finite SHIRE binary command value.\n");
+               Valid = 0;
+            }
+         }
+         if (Valid && Cmd->type == SHIRE_IPC_CMD_WHEEL &&
+             (Cmd->enable_mask & (1U << 3)) != 0 &&
+             !isfinite(Cmd->values[3])) {
+            printf("Invalid non-finite SHIRE wheel command value.\n");
+            Valid = 0;
+         }
+      }
+      for(c=0;Valid && c<Batch.count;c++) {
+         shire_ipc_command_t *Cmd = &Batch.commands[c];
+         if (Cmd->type == SHIRE_IPC_CMD_WHEEL) {
+            for(i=0;i<4 && i<(uint32_t)SC[Cmd->spacecraft_id].Nw;i++)
+               if (Cmd->enable_mask & (1U << i))
+                  SC[Cmd->spacecraft_id].Whl[i].Tcmd = Cmd->values[i];
+         }
+         else if (Cmd->type == SHIRE_IPC_CMD_MTB) {
+            for(i=0;i<3 && i<(uint32_t)SC[Cmd->spacecraft_id].Nmtb;i++)
+               if (Cmd->enable_mask & (1U << i))
+                  SC[Cmd->spacecraft_id].MTB[i].Mcmd = Cmd->values[i];
+         }
+         else if (Cmd->type == SHIRE_IPC_CMD_THRUSTER) {
+            for(i=0;i<3;i++) {
+               if (Cmd->enable_mask & (1U << i)) {
+                  SC[Cmd->spacecraft_id].IdealAct[i].Fcmd = Cmd->values[i];
+                  SC[Cmd->spacecraft_id].IdealAct[i].Tcmd = Cmd->values[i+3];
+               }
+            }
+         }
+      }
+      Ack.status = Valid ? 0 : -1;
+      if (ShireWriteAll(Socket,&Ack,sizeof(Ack)) != 0) {
+         printf("Error acknowledging binary commands.\n");
+         exit(1);
+      }
+}
+
 /******************************************************************************/
 void WriteToSocket(SOCKET Socket,  char **Prefix, long Nprefix, long EchoEnabled)
 {
+      if (ShireBinaryIpcEnabled()) {
+         ShireWriteBinaryState(Socket);
+         return;
+      }
       struct SCType *S;
       struct WorldType *W;
       struct OrbitType *O;
@@ -498,17 +684,25 @@ void WriteToSocket(SOCKET Socket,  char **Prefix, long Nprefix, long EchoEnabled
       if (EchoEnabled) printf("MsgLen = %ld\n",MsgLen);
       printf("\n");
 
-      Success = write(Socket,Msg,MsgLen);
-      if (Success < 0) {
+      Success = ShireWriteAll(Socket,Msg,(size_t)MsgLen);
+      if (Success != 0) {
          printf("Error writing to socket in WriteToSocket.\n");
          exit(1);
       }
-      read(Socket,Ack,4);
+      if (ShireReadAll(Socket,Ack,sizeof(Ack)) != 0 ||
+          memcmp(Ack,"Ack",sizeof(Ack)) != 0) {
+         printf("Error reading acknowledgement in WriteToSocket.\n");
+         exit(1);
+      }
 
 }
 /******************************************************************************/
 void ReadFromSocket(SOCKET Socket, long EchoEnabled)
 {
+      if (ShireBinaryIpcEnabled()) {
+         ShireReadBinaryCommands(Socket);
+         return;
+      }
 
       struct SCType *S;
       struct OrbitType *O;
@@ -517,9 +711,9 @@ void ReadFromSocket(SOCKET Socket, long EchoEnabled)
       char line[512] = "Blank";
       long RequestTimeRefresh = 0;
       long Done;
-      char Msg[16384];
+      char Msg[32768];
       long Imsg,Iline;
-      int NumBytes;
+      size_t NumBytes;
       double DbleVal[30];
       long LongVal[30];
       long Year,doy,Hour,Minute;
@@ -527,12 +721,10 @@ void ReadFromSocket(SOCKET Socket, long EchoEnabled)
       char Ack[4] = "Ack\0";
       long k;
 
-      NumBytes = read(Socket,Msg,16384);
-      if (NumBytes < 0) {
-         printf("Error reading from socket in ReadFromSocket.\n");
+      if (ShireReadTextFrame(Socket,Msg,sizeof(Msg),&NumBytes) != 0) {
+         printf("Error reading complete text frame from socket in ReadFromSocket.\n");
          exit(1);
       }
-      write(Socket,Ack,4);
 
       Done = 0;
       Imsg = 0;
@@ -540,8 +732,12 @@ void ReadFromSocket(SOCKET Socket, long EchoEnabled)
          /* Parse lines from Msg, newline-delimited */
          Iline = 0;
          memset(line,'\0',512);
-         while((Msg[Imsg] != '\n') && (Iline < 511) && (Imsg < 16383)) {
+         while(((size_t)Imsg < NumBytes) && (Msg[Imsg] != '\n') && (Iline < 511)) {
             line[Iline++] = Msg[Imsg++];
+         }
+         if ((size_t)Imsg >= NumBytes || Msg[Imsg] != '\n') {
+            printf("Malformed text frame in ReadFromSocket.\n");
+            exit(1);
          }
          line[Iline++] = Msg[Imsg++];
          if (EchoEnabled) printf("%s",line);
@@ -841,10 +1037,14 @@ void ReadFromSocket(SOCKET Socket, long EchoEnabled)
             Done = 1;
             //sprintf(line,"[ENDMSG] reached\n");
          }
-         if (Imsg >= 16383) {
+         if ((size_t)Imsg >= NumBytes && !Done) {
             Done = 1;
-            printf("Imsg limit exceeded\n");
+            printf("Text frame ended before [ENDMSG]\n");
          }
+      }
+      if (ShireWriteAll(Socket,Ack,sizeof(Ack)) != 0) {
+         printf("Error writing acknowledgement in ReadFromSocket.\n");
+         exit(1);
       }
       if (EchoEnabled) printf("MsgLen = %ld\n\n",Imsg);
 
