@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #define SHIRE_IPC_MAGIC 0x53484952U /* "SHIR" */
-#define SHIRE_IPC_VERSION 2U
+#define SHIRE_IPC_VERSION 3U
 #define SHIRE_IPC_MAX_COMMANDS 64U
 
 enum
@@ -35,7 +35,11 @@ typedef struct
 typedef struct
 {
     shire_ipc_header_t header;
-    double sim_time;
+    double sim_time;      /* Elapsed seconds since this simulation run started (resets to 0 each run). */
+    double utc_civil_time; /* Absolute UTC time [sec since J2000], i.e. 42's CivilTime global -- anchored
+                             * to the calendar epoch configured in Inp_Sim.txt (Date/Time (UTC) fields),
+                             * not just elapsed run time. This is what consumers needing a real calendar-
+                             * referenced time (e.g. GPS time sync) must use instead of sim_time. */
     double qn[4];
     double wn[3];
     double pos_n[3];
@@ -87,13 +91,13 @@ typedef struct
 
 #if defined(__cplusplus)
 static_assert(sizeof(shire_ipc_header_t) == 16, "unexpected SHIRE IPC header layout");
-static_assert(sizeof(shire_ipc_state_t) == 320, "unexpected SHIRE IPC state layout");
+static_assert(sizeof(shire_ipc_state_t) == 328, "unexpected SHIRE IPC state layout");
 static_assert(sizeof(shire_ipc_command_t) == 64, "unexpected SHIRE IPC command layout");
 static_assert(sizeof(shire_ipc_ack_t) == 24, "unexpected SHIRE IPC ack layout");
 static_assert(sizeof(shire_ipc_commands_t) == 4120, "unexpected SHIRE IPC batch layout");
 #else
 _Static_assert(sizeof(shire_ipc_header_t) == 16, "unexpected SHIRE IPC header layout");
-_Static_assert(sizeof(shire_ipc_state_t) == 320, "unexpected SHIRE IPC state layout");
+_Static_assert(sizeof(shire_ipc_state_t) == 328, "unexpected SHIRE IPC state layout");
 _Static_assert(sizeof(shire_ipc_command_t) == 64, "unexpected SHIRE IPC command layout");
 _Static_assert(sizeof(shire_ipc_ack_t) == 24, "unexpected SHIRE IPC ack layout");
 _Static_assert(sizeof(shire_ipc_commands_t) == 4120, "unexpected SHIRE IPC batch layout");

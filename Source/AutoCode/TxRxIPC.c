@@ -70,6 +70,7 @@ static void ShireWriteBinaryState(SOCKET Socket)
       State.header.type = SHIRE_IPC_STATE;
       State.header.payload_size = sizeof(State)-sizeof(State.header);
       State.sim_time = SimTime;
+      State.utc_civil_time = CivilTime;
       if (Nsc > 0 && SC[0].Exists) {
          for(i=0;i<4;i++) State.qn[i] = SC[0].qn[i];
          for(i=0;i<3;i++) {
