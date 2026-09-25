@@ -15,6 +15,47 @@
 #define DECLARE_GLOBALS
 #include "42.h"
 #undef DECLARE_GLOBALS
+#include <inttypes.h>
+#include <time.h>
+
+enum { SHIRE_42_PRE_IPC, SHIRE_42_IPC, SHIRE_42_EPHEMERIDES,
+       SHIRE_42_ENVIRONMENT, SHIRE_42_REPORT, SHIRE_42_SEGMENTS };
+
+static uint64_t Shire42ProfileTotal[SHIRE_42_SEGMENTS];
+static uint64_t Shire42ProfileCount;
+
+static uint64_t Shire42MonotonicNs(void)
+{
+      struct timespec Now;
+      clock_gettime(CLOCK_MONOTONIC,&Now);
+      return (uint64_t)Now.tv_sec*1000000000ULL+(uint64_t)Now.tv_nsec;
+}
+
+static int Shire42ProfileEnabled(void)
+{
+      static int Enabled = -1;
+      if (Enabled < 0) {
+         const char *Value = getenv("SHIRE_42_PROFILE");
+         Enabled = Value != NULL && strcmp(Value,"1") == 0;
+      }
+      return Enabled;
+}
+
+static void Shire42ProfilePrint(void)
+{
+      static const char *Names[SHIRE_42_SEGMENTS] = {
+         "pre_ipc", "ipc", "ephemerides", "environment", "report"
+      };
+      fprintf(stderr,"SHIRE_42_TIMING {\"count\":%" PRIu64 ",\"segments\":[",
+              Shire42ProfileCount);
+      for(int i=0;i<SHIRE_42_SEGMENTS;i++) {
+         fprintf(stderr,"%s{\"name\":\"%s\",\"mean_us\":%.3f}",
+                 i == 0 ? "" : ",", Names[i],
+                 Shire42ProfileCount == 0 ? 0.0 :
+                 (double)Shire42ProfileTotal[i]/(double)Shire42ProfileCount/1000.0);
+      }
+      fprintf(stderr,"]}\n");
+}
 
 /* #ifdef __cplusplus
 ** namespace _42 {
@@ -322,6 +363,20 @@ long SimStep(void)
       struct SCType *S;
       long SimComplete;
       double TotalRunTime;
+      int Profile = Shire42ProfileEnabled();
+      uint64_t ProfileTime[SHIRE_42_SEGMENTS+1];
+      static int ReportMode = -1;
+      if (ReportMode < 0) {
+         const char *mode = getenv("SHIRE_42_REPORT_MODE");
+         if (mode == NULL || strcmp(mode, "full") == 0)
+            ReportMode = 1;
+         else if (strcmp(mode, "control") == 0)
+            ReportMode = 0;
+         else {
+            fprintf(stderr, "Invalid SHIRE_42_REPORT_MODE: %s\n", mode);
+            exit(EXIT_FAILURE);
+         }
+      }
 
       if (First) {
          First = 0;
@@ -345,9 +400,10 @@ long SimStep(void)
             }
          }
          CommLinkPerformance();
-         Report();  /* File Output */
+         if (ReportMode) Report();  /* Legacy file output */
       }
 
+      if (Profile) ProfileTime[0] = Shire42MonotonicNs();
       ReportProgress();
       ManageFlags();
 
@@ -364,8 +420,11 @@ long SimStep(void)
       /* Update SC Bounding Boxes occasionally */
       ManageBoundingBoxes();
 
+      if (Profile) ProfileTime[1] = Shire42MonotonicNs();
       InterProcessComm(); /* Send and receive from external processes */
+      if (Profile) ProfileTime[2] = Shire42MonotonicNs();
       Ephemerides(); /* Sun, Moon, Planets, Spacecraft, Useful Auxiliary Frames */
+      if (Profile) ProfileTime[3] = Shire42MonotonicNs();
       ZeroFrcTrq();
       for(Isc=0;Isc<Nsc;Isc++) {
          S = &SC[Isc];
@@ -379,10 +438,22 @@ long SimStep(void)
          }
       }
       CommLinkPerformance();
-      Report();  /* File Output */
+      if (Profile) ProfileTime[4] = Shire42MonotonicNs();
+      if (ReportMode) Report();  /* Legacy file output */
+      if (Profile) {
+         ProfileTime[5] = Shire42MonotonicNs();
+         if (SimTime >= 5.0) {
+            for(int i=0;i<SHIRE_42_SEGMENTS;i++)
+               Shire42ProfileTotal[i] += ProfileTime[i+1]-ProfileTime[i];
+            Shire42ProfileCount++;
+            if (Shire42ProfileCount % 1000 == 0)
+               Shire42ProfilePrint();
+         }
+      }
 
       /* Exit when Stoptime is reached */
       if (SimComplete) {
+         if (Profile) Shire42ProfilePrint();
          if (TimeMode == FAST_TIME) {
             RealRunTime(&TotalRunTime,DTSIM);
             printf("     Total Run Time = %9.2lf sec\n", TotalRunTime);

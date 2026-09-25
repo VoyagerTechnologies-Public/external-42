@@ -1,10 +1,93 @@
+#define _GNU_SOURCE
 #include "42.h"
 #include "shire_ipc_protocol.h"
 #include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <linux/futex.h>
 #include <math.h>
+#include <sys/file.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+#include <time.h>
+#include <unistd.h>
 #define EXTERN extern
 #include "Ac.h"
 #undef EXTERN
+
+static shire_ipc_shared_t *ShireShared = NULL;
+static int ShireSharedFd = -1;
+static uint32_t ShireSharedSeq = 1;
+
+int ShireSharedIpcEnabled(void)
+{
+      const char *Mode = getenv("FORTYTWO_IPC_MODE");
+      return Mode != NULL && strcmp(Mode,"shared") == 0;
+}
+
+static void ShireSharedClose(void)
+{
+      if (ShireShared != NULL) munmap(ShireShared,sizeof(*ShireShared));
+      if (ShireSharedFd >= 0) close(ShireSharedFd);
+      ShireShared = NULL;
+      ShireSharedFd = -1;
+      unlink(SHIRE_IPC_SHARED_PATH);
+}
+
+void ShireInitSharedIpc(void)
+{
+      if (ShireShared != NULL) return;
+      /* The owning 42 process replaces any file left by a crashed run. */
+      unlink(SHIRE_IPC_SHARED_PATH);
+      ShireSharedFd = open(SHIRE_IPC_SHARED_PATH,O_RDWR|O_CREAT|O_EXCL,0600);
+      if (ShireSharedFd < 0 || flock(ShireSharedFd,LOCK_EX|LOCK_NB) != 0 ||
+          ftruncate(ShireSharedFd,sizeof(*ShireShared)) != 0) {
+         printf("Unable to create SHIRE shared 42 IPC.\n");
+         exit(1);
+      }
+      ShireShared = mmap(NULL,sizeof(*ShireShared),PROT_READ|PROT_WRITE,
+                         MAP_SHARED,ShireSharedFd,0);
+      if (ShireShared == MAP_FAILED) {
+         ShireShared = NULL;
+         printf("Unable to map SHIRE shared 42 IPC.\n");
+         exit(1);
+      }
+      memset(ShireShared,0,sizeof(*ShireShared));
+      ShireShared->version = SHIRE_IPC_SHARED_VERSION;
+      __atomic_store_n(&ShireShared->magic,SHIRE_IPC_SHARED_MAGIC,__ATOMIC_RELEASE);
+      atexit(ShireSharedClose);
+}
+
+static void ShireSharedWake(uint32_t *Word)
+{
+      (void)syscall(SYS_futex,Word,FUTEX_WAKE,INT_MAX,NULL,NULL,0);
+}
+
+static int ShireSharedWait(uint32_t *Word, uint32_t Expected)
+{
+      struct timespec Now;
+      clock_gettime(CLOCK_MONOTONIC,&Now);
+      uint64_t SpinUntil = (uint64_t)Now.tv_sec*1000000000ULL+
+                           (uint64_t)Now.tv_nsec+100000ULL;
+      while (__atomic_load_n(Word,__ATOMIC_ACQUIRE) != Expected) {
+         uint32_t Observed = __atomic_load_n(Word,__ATOMIC_ACQUIRE);
+         if (Observed == Expected) return 0;
+         if (Observed > Expected) return -1;
+         clock_gettime(CLOCK_MONOTONIC,&Now);
+         if ((uint64_t)Now.tv_sec*1000000000ULL+(uint64_t)Now.tv_nsec < SpinUntil) {
+#if defined(__x86_64__) || defined(__i386__)
+            __builtin_ia32_pause();
+#endif
+            continue;
+         }
+         struct timespec Timeout = {.tv_sec = 5};
+         if (syscall(SYS_futex,Word,FUTEX_WAIT,Observed,&Timeout,NULL,0) < 0 &&
+             errno != EAGAIN && errno != EINTR &&
+             __atomic_load_n(Word,__ATOMIC_ACQUIRE) != Expected) return -1;
+      }
+      return 0;
+}
 
 static int ShireBinaryIpcEnabled(void)
 {
@@ -93,7 +176,12 @@ static void ShireWriteBinaryState(SOCKET Socket)
             State.vel_n[i] = Orb[0].VelN[i];
          }
       }
-      if (ShireWriteAll(Socket,&State,sizeof(State)) != 0) {
+      if (ShireSharedIpcEnabled()) {
+         ShireShared->state = State;
+         __atomic_store_n(&ShireShared->state_seq,ShireSharedSeq,__ATOMIC_RELEASE);
+         ShireSharedWake(&ShireShared->state_seq);
+      }
+      else if (ShireWriteAll(Socket,&State,sizeof(State)) != 0) {
          printf("Error writing binary state to socket.\n");
          exit(1);
       }
@@ -106,7 +194,15 @@ static void ShireReadBinaryCommands(SOCKET Socket)
       uint32_t c,i;
       int Valid = 1;
       memset(&Batch,0,sizeof(Batch));
-      if (ShireReadAll(Socket,&Batch.header,sizeof(Batch.header)) != 0) {
+      if (ShireSharedIpcEnabled()) {
+         if (ShireSharedWait(&ShireShared->command_seq,ShireSharedSeq) != 0) {
+            fprintf(stderr,"SHIRE shared 42 command wait failed: expected=%u observed=%u errno=%d\n",
+                    ShireSharedSeq,__atomic_load_n(&ShireShared->command_seq,__ATOMIC_ACQUIRE),errno);
+            exit(1);
+         }
+         Batch = ShireShared->commands;
+      }
+      else if (ShireReadAll(Socket,&Batch.header,sizeof(Batch.header)) != 0) {
          printf("Error reading binary commands from socket.\n");
          exit(1);
       }
@@ -114,7 +210,8 @@ static void ShireReadBinaryCommands(SOCKET Socket)
          printf("Oversized SHIRE binary command frame.\n");
          exit(1);
       }
-      if (ShireReadAll(Socket,&Batch.count,Batch.header.payload_size) != 0) {
+      if (!ShireSharedIpcEnabled() &&
+          ShireReadAll(Socket,&Batch.count,Batch.header.payload_size) != 0) {
          printf("Error reading binary command payload from socket.\n");
          exit(1);
       }
@@ -180,7 +277,13 @@ static void ShireReadBinaryCommands(SOCKET Socket)
          }
       }
       Ack.status = Valid ? 0 : -1;
-      if (ShireWriteAll(Socket,&Ack,sizeof(Ack)) != 0) {
+      if (ShireSharedIpcEnabled()) {
+         ShireShared->ack_status = Ack.status;
+         __atomic_store_n(&ShireShared->ack_seq,ShireSharedSeq,__ATOMIC_RELEASE);
+         ShireSharedWake(&ShireShared->ack_seq);
+         ShireSharedSeq++;
+      }
+      else if (ShireWriteAll(Socket,&Ack,sizeof(Ack)) != 0) {
          printf("Error acknowledging binary commands.\n");
          exit(1);
       }

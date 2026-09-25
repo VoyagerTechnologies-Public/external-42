@@ -8,6 +8,13 @@
 #define SHIRE_IPC_VERSION 3U
 #define SHIRE_IPC_MAX_COMMANDS 64U
 
+/* Local Linux transport for the same state/command/ack cycle as TXRX.
+ * The producer owns state_seq, the Director owns command_seq, and 42 owns
+ * ack_seq. A sequence is published only after its payload is fully written. */
+#define SHIRE_IPC_SHARED_PATH "/tmp/42_ipc_shared.v1"
+#define SHIRE_IPC_SHARED_MAGIC 0x53483432U /* "SH42" */
+#define SHIRE_IPC_SHARED_VERSION 1U
+
 enum
 {
     SHIRE_IPC_STATE = 1,
@@ -78,6 +85,18 @@ typedef struct
     uint32_t reserved;
     shire_ipc_command_t commands[SHIRE_IPC_MAX_COMMANDS];
 } shire_ipc_commands_t;
+
+typedef struct
+{
+    uint32_t magic;
+    uint32_t version;
+    uint32_t state_seq;
+    uint32_t command_seq;
+    uint32_t ack_seq;
+    int32_t ack_status;
+    shire_ipc_state_t state;
+    shire_ipc_commands_t commands;
+} shire_ipc_shared_t;
 
 /* Command frames contain the header, count/reserved prefix, and only the
  * populated command records. The maximum-sized structure remains bounded
