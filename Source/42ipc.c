@@ -35,6 +35,8 @@ void WriteToFile(FILE *StateFile, char **Prefix, long Nprefix, long EchoEnabled)
 void WriteToSocket(SOCKET Socket,  char **Prefix, long Nprefix, long EchoEnabled);
 void ReadFromFile(FILE *StateFile, long EchoEnabled);
 void ReadFromSocket(SOCKET Socket, long EchoEnabled);
+int ShireSharedIpcEnabled(void);
+void ShireInitSharedIpc(void);
 
 /*********************************************************************/
 void InitInterProcessComm(void)
@@ -122,7 +124,11 @@ void InitInterProcessComm(void)
 
          }
          else if (I->Mode == IPC_TXRX) {
-            if (I->SocketRole == IPC_SERVER) {
+            if (ShireSharedIpcEnabled() && I->SocketRole == IPC_SERVER) {
+               ShireInitSharedIpc();
+               I->Socket = -1;
+            }
+            else if (I->SocketRole == IPC_SERVER) {
                if (I->HostName[0] == '/')
                   I->Socket = InitUnixSocketServer(I->HostName,I->AllowBlocking);
                else
