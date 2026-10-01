@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #define SHIRE_IPC_MAGIC 0x53484952U /* "SHIR" */
-#define SHIRE_IPC_VERSION 3U
+#define SHIRE_IPC_VERSION 4U
 #define SHIRE_IPC_MAX_COMMANDS 64U
 
 /* Local Linux transport for the same state/command/ack cycle as TXRX.
@@ -60,6 +60,7 @@ typedef struct
     int32_t eclipse;
     uint32_t reserved;
     double atmo_density;
+    double cwn[3][3]; /* inertial N to Earth-fixed W, from 42 */
 } shire_ipc_state_t;
 
 typedef struct
@@ -110,13 +111,13 @@ typedef struct
 
 #if defined(__cplusplus)
 static_assert(sizeof(shire_ipc_header_t) == 16, "unexpected SHIRE IPC header layout");
-static_assert(sizeof(shire_ipc_state_t) == 328, "unexpected SHIRE IPC state layout");
+static_assert(sizeof(shire_ipc_state_t) == 400, "unexpected SHIRE IPC state layout");
 static_assert(sizeof(shire_ipc_command_t) == 64, "unexpected SHIRE IPC command layout");
 static_assert(sizeof(shire_ipc_ack_t) == 24, "unexpected SHIRE IPC ack layout");
 static_assert(sizeof(shire_ipc_commands_t) == 4120, "unexpected SHIRE IPC batch layout");
 #else
 _Static_assert(sizeof(shire_ipc_header_t) == 16, "unexpected SHIRE IPC header layout");
-_Static_assert(sizeof(shire_ipc_state_t) == 328, "unexpected SHIRE IPC state layout");
+_Static_assert(sizeof(shire_ipc_state_t) == 400, "unexpected SHIRE IPC state layout");
 _Static_assert(sizeof(shire_ipc_command_t) == 64, "unexpected SHIRE IPC command layout");
 _Static_assert(sizeof(shire_ipc_ack_t) == 24, "unexpected SHIRE IPC ack layout");
 _Static_assert(sizeof(shire_ipc_commands_t) == 4120, "unexpected SHIRE IPC batch layout");
