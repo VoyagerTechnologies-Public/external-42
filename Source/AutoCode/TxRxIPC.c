@@ -81,7 +81,9 @@ static int ShireSharedWait(uint32_t *Word, uint32_t Expected)
 #endif
             continue;
          }
-         struct timespec Timeout = {.tv_sec = 5};
+         /* First command may arrive after Yamcs and FSW startup; later ticks
+          * retain the short synchronized-control watchdog. */
+         struct timespec Timeout = {.tv_sec = ShireSharedSeq == 1 ? 90 : 5};
          if (syscall(SYS_futex,Word,FUTEX_WAIT,Observed,&Timeout,NULL,0) < 0 &&
              errno != EAGAIN && errno != EINTR &&
              __atomic_load_n(Word,__ATOMIC_ACQUIRE) != Expected) return -1;
@@ -169,6 +171,7 @@ static void ShireWriteBinaryState(SOCKET Socket)
          State.mass = SC[0].mass;
          State.eclipse = (int32_t)SC[0].Eclipse;
          State.atmo_density = SC[0].AtmoDensity;
+         for(i=0;i<3;i++) memcpy(State.cwn[i],World[EARTH].CWN[i],3*sizeof(double));
       }
       if (Norb > 0 && Orb[0].Exists) {
          for(i=0;i<3;i++) {
