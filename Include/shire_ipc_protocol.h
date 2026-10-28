@@ -12,6 +12,11 @@
  * The producer owns state_seq, the Director owns command_seq, and 42 owns
  * ack_seq. A sequence is published only after its payload is fully written. */
 #define SHIRE_IPC_SHARED_PATH "/tmp/42_ipc_shared.v1"
+/* The Director holds an exclusive flock on this file for as long as it runs.
+ * 42 uses it to tell a Director that is idle, such as while the simulation is
+ * paused, from one that has exited, because the kernel drops the lock with
+ * the process. */
+#define SHIRE_IPC_DIRECTOR_LOCK_PATH "/tmp/42_ipc_director.v1.lock"
 #define SHIRE_IPC_SHARED_MAGIC 0x53483432U /* "SH42" */
 #define SHIRE_IPC_SHARED_VERSION 1U
 
