@@ -64,6 +64,17 @@ static void ShireSharedWake(uint32_t *Word)
       (void)syscall(SYS_futex,Word,FUTEX_WAKE,INT_MAX,NULL,NULL,0);
 }
 
+/* True while the Director holds its lock file, which is also true while it is idle. */
+static int ShireDirectorAlive(void)
+{
+      int Fd = open(SHIRE_IPC_DIRECTOR_LOCK_PATH,O_RDONLY);
+      int Held;
+      if (Fd < 0) return 0;
+      Held = flock(Fd,LOCK_SH|LOCK_NB) != 0 && errno == EWOULDBLOCK;
+      close(Fd);
+      return Held;
+}
+
 static int ShireSharedWait(uint32_t *Word, uint32_t Expected)
 {
       struct timespec Now;
@@ -86,7 +97,12 @@ static int ShireSharedWait(uint32_t *Word, uint32_t Expected)
          struct timespec Timeout = {.tv_sec = ShireSharedSeq == 1 ? 90 : 5};
          if (syscall(SYS_futex,Word,FUTEX_WAIT,Observed,&Timeout,NULL,0) < 0 &&
              errno != EAGAIN && errno != EINTR &&
-             __atomic_load_n(Word,__ATOMIC_ACQUIRE) != Expected) return -1;
+             __atomic_load_n(Word,__ATOMIC_ACQUIRE) != Expected) {
+            /* A paused simulation sends no commands, so the watchdog only
+             * ends the wait when the Director is gone. */
+            if (errno == ETIMEDOUT && ShireSharedSeq > 1 && ShireDirectorAlive()) continue;
+            return -1;
+         }
       }
       return 0;
 }
